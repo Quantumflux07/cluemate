@@ -1,105 +1,177 @@
-[README.md](https://github.com/user-attachments/files/34526685/README.md)
-# ClueMate
+<div align="center">
+  <img src="assets/cluemate-banner.svg" alt="ClueMate — Think together. Commit with confidence." width="100%" />
+  <br />
+  <p><strong>A room full of opinions. One live signal.</strong></p>
+  <p>ClueMate is a real-time group confidence-voting app for external vivas, quizzes, and decisions where the room needs to think together.</p>
+  <p>
+    <img src="https://img.shields.io/badge/Expo-React_Native-111827?style=for-the-badge&logo=expo&logoColor=white" alt="Expo and React Native" />
+    <img src="https://img.shields.io/badge/TypeScript-typed-3178C6?style=for-the-badge&logo=typescript&logoColor=white" alt="TypeScript" />
+    <img src="https://img.shields.io/badge/Supabase-realtime-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white" alt="Supabase" />
+    <img src="https://img.shields.io/badge/Zustand-state-764ABC?style=for-the-badge&logo=react&logoColor=white" alt="Zustand state management" />
+  </p>
+  <p>
+    <a href="#-what-makes-it-different">How it works</a> ·
+    <a href="#-get-it-running">Get started</a> ·
+    <a href="#-architecture">Architecture</a> ·
+    <a href="#-verification">Verification</a>
+  </p>
+</div>
 
-**Think together.**
+---
 
-ClueMate is a real-time group voting app designed for situations such as an external viva, quiz, or team decision. Participants independently allocate confidence across answer options, commit their response, and see the room's live consensus. A room operator can advance the group to the next poll and end the session.
+## `01` / The idea
 
-> **Project status:** This README documents the current project architecture and intended app behavior. Verify multi-device Realtime synchronization and room-ending behavior in your environment before relying on them in a live session.
+Most group-voting tools collect answers. **ClueMate makes the room's changing confidence visible.**
 
-## Features
+Each participant distributes confidence across **A / B / C / D**, then explicitly commits their response. As committed votes arrive, the app calculates the active room's aggregate leader. The leading option gets a glowing, rotating dotted border—on **everyone's screen**, not just on the screen of someone who picked it.
 
-- **Create and join rooms:** An operator creates a room and participants join using a room code.
-- **Confidence allocation:** Distribute confidence across options A, B, C, and D in 25% increments.
-- **Explicit commit:** Draft changes do not count until the participant commits. Participants can recommit to replace their previous response.
-- **Don't Know response:** Submit a separate “Don't Know” response without treating it as an answer option allocation.
-- **Live room state:** Supabase is used to synchronize room and poll state across clients.
-- **Leader indicator:** The intended experience highlights the globally leading option with a rotating dotted border and a subtle matching glow. It should be driven by committed responses from the active poll—not a participant's own draft.
-- **Operator controls:** The operator can advance the poll and end the room; these actions should not be available to ordinary participants.
-- **Dark, mobile-first interface:** A minimal dark theme with distinct colors for each option.
+> **The glow is the room's signal—not your personal selection.**
 
-## Tech stack
+## `02` / What makes it different
 
-- **App:** React Native, Expo, TypeScript
-- **Navigation:** Expo Router
-- **Backend:** Supabase
-- **Data and authentication:** Supabase Auth, PostgreSQL, Row Level Security (RLS), database functions/RPCs
-- **Live updates:** Supabase Realtime
-- **State management:** Zustand
-- **Secure storage:** Expo SecureStore on native platforms, with web storage support for web builds
-- **Tests and validation:** TypeScript, `tsx` allocation tests, Expo Doctor
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>◉ Confidence, not just a click</h3>
+      Split your confidence across four answers in 25% increments instead of being limited to a single pick.
+    </td>
+    <td width="50%" valign="top">
+      <h3>◎ Commit means commit</h3>
+      Draft changes stay local until the participant commits. Recommit replaces that participant's active response.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>✳ One shared leader</h3>
+      The leading answer is calculated from committed responses for the current poll version and reflected across clients.
+    </td>
+    <td width="50%" valign="top">
+      <h3>⌁ Operator controls</h3>
+      The room operator advances the poll and ends the session; participants follow the authoritative room state.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <h3>◌ Don't Know is a real response</h3>
+      Participants can express uncertainty without pretending it is option A, B, C, or D.
+    </td>
+    <td width="50%" valign="top">
+      <h3>◈ Built for the room</h3>
+      A dark, mobile-first interface keeps attention on the question and the group's changing consensus.
+    </td>
+  </tr>
+</table>
 
-## Requirements
+## `03` / The live-leader mechanic
 
-- Node.js and npm versions supported by the Expo SDK used by this project
+The dotted border belongs around the **actual voting option card**. It is driven by the room's aggregate—not by the current user's selection, draft, or locally guessed result.
+
+| Committed responses | Expected room-wide signal |
+|---|---|
+| No responses yet | No option is highlighted. |
+| One participant commits `A = 100%` | `A` is highlighted on every client. |
+| Two more participants commit `B = 100%` | `B` becomes the leader and the highlight moves to `B` everywhere. |
+| Another answer overtakes the current leader | The highlight follows the new leader. |
+| Two options tie for the highest positive score | Both leading options are highlighted. |
+| A participant edits a draft but does not commit | The current leader does not change. |
+
+**Option palette**
+
+<table>
+  <tr><td><code>A</code></td><td><code>#38BDF8</code></td><td><span style="color:#38BDF8">●</span> Sky</td><td><code>B</code></td><td><code>#FB7185</code></td><td><span style="color:#FB7185">●</span> Rose</td></tr>
+  <tr><td><code>C</code></td><td><code>#34D399</code></td><td><span style="color:#34D399">●</span> Mint</td><td><code>D</code></td><td><code>#FB923C</code></td><td><span style="color:#FB923C">●</span> Orange</td></tr>
+</table>
+
+## `04` / Under the hood
+
+```mermaid
+flowchart LR
+    P[Participant adjusts draft] --> C[Commit / Recommit]
+    C --> DB[(Supabase poll response)]
+    DB --> RT[Realtime notification]
+    RT --> AG[Authoritative aggregate]
+    AG --> LD{Find top score}
+    LD --> UI[Glow the leading option]
+    UI --> ALL[Every client in the room]
+
+    OP[Operator: Next Question] --> RPC[refresh_poll RPC]
+    RPC --> ROOM[(Authoritative room state)]
+    ROOM --> SYNC[Realtime + state resync]
+    SYNC --> RESET[New poll · timer reset · old leader cleared]
+```
+
+The intended synchronization contract is straightforward:
+
+- **Supabase is authoritative.** The operator's local screen must not independently decide that a poll has advanced.
+- **Poll versions matter.** Responses and aggregate values from previous poll versions must not leak into the new question.
+- **Realtime is a signal, not a substitute for state recovery.** Clients should load the latest server state on connection/reconnection and recover if an event is missed.
+- **UI permissions are not security.** Room membership and operator-only actions must also be enforced by backend authorization and RLS.
+
+## `05` / Stack
+
+| Layer | Technology | Responsibility |
+|---|---|---|
+| App | React Native + Expo | Cross-platform mobile UI and development workflow |
+| Language | TypeScript | Typed components, hooks, and app state |
+| Navigation | Expo Router | Route and room navigation |
+| State | Zustand | Shared client-side room/voting state |
+| Backend | Supabase + PostgreSQL | Persistence, authentication, RPCs, and access policies |
+| Realtime | Supabase Realtime | Room updates and committed-response change signals |
+| Native persistence | Expo SecureStore | Native session storage adapter |
+| Validation | TypeScript, `tsx`, Expo Doctor | Static checks and utility tests |
+
+## `06` / Get it running
+
+### Prerequisites
+
+- Node.js and npm compatible with the Expo SDK installed in this repository
 - A Supabase project
-- Expo Go or a suitable simulator/device for mobile testing
+- Expo Go, a simulator, or another supported runtime
 
-## Getting started
-
-### 1. Install dependencies
-
-Clone or open the project, then run these commands from the project root:
+### Install
 
 ```bash
+git clone <your-repository-url>
+cd cluemate
 npm install
 ```
 
-### 2. Configure environment variables
+### Configure Supabase
 
-Create a `.env` file in the project root. You can start from `.env.example` if it exists.
+Create a `.env` file in the project root. If `.env.example` exists, use it as a template.
 
 ```env
 EXPO_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT_ID.supabase.co
-EXPO_PUBLIC_SUPABASE_ANON_KEY=YOUR_SUPABASE_PUBLISHABLE_OR_ANON_KEY
+EXPO_PUBLIC_SUPABASE_ANON_KEY=YOUR_PUBLIC_CLIENT_KEY
 ```
 
-Get the project URL and public client key from your Supabase project settings.
+Copy the project URL and public client key from your Supabase project settings. Never place a `service_role` key in the app, in an `EXPO_PUBLIC_` variable, or in version control. Public client keys are not a replacement for correctly configured RLS policies.
 
-**Security:** Never put a Supabase `service_role` key in an Expo app or any `EXPO_PUBLIC_` variable. Client-side values are bundled into the application; use the public key together with correctly configured RLS policies.
+### Database setup
 
-### 3. Set up Supabase
-
-The project includes a migration at:
+The repository's initial migration is expected at:
 
 ```text
 supabase/migrations/20261107000000_initial_schema.sql
 ```
 
-Review the migration and the current database state before applying it. If the migration has not already been applied, run it through the Supabase SQL Editor or your team's normal migration workflow. Do not blindly rerun it against an existing database.
+Review the migration and the current database before applying it. If the schema is already present, **do not blindly rerun the migration**. Use the team's normal Supabase migration workflow or the SQL Editor after confirming what has already been applied.
 
-The initial schema is intended to provide the core room and voting data model, including profiles, rooms, room membership, and poll responses, plus the relevant database functions, access policies, and Realtime configuration. Confirm these objects and policies in your Supabase project before testing the application.
-
-### 4. Start the app
-
-Start Expo with a clean cache:
+### Start development
 
 ```bash
 npx expo start -c
 ```
 
-Use the Expo CLI prompts to open the app in Expo Go, a simulator, or a browser if the project's installed dependencies support that target.
-
-For a web development session, you can also try:
+For a web development session, if supported by the installed project dependencies:
 
 ```bash
 npx expo start --web
 ```
 
-## How voting works
+## `07` / Validation commands
 
-1. The operator creates a room.
-2. Participants join using the room code.
-3. Each participant adjusts their local confidence allocation across A/B/C/D.
-4. Participants explicitly commit their response. Draft edits alone should not affect room-wide results.
-5. Recommitting should replace that participant's response for the active poll rather than create a second vote.
-6. The app uses committed responses for the active poll version to calculate the room's aggregate leader.
-7. The operator advances to the next poll. All clients should load the new authoritative poll version, reset their local draft and timer state, and stop displaying results from the previous poll.
-8. When the operator ends the room, all participants should see that the session has ended and be unable to keep voting.
-
-## Validation commands
-
-Run these from the project root:
+Run from the repository root:
 
 ```bash
 npx tsc --noEmit
@@ -108,93 +180,110 @@ npx --yes expo-doctor
 npx expo export --platform web
 ```
 
-These commands validate TypeScript, the allocation utility tests, Expo configuration, and a web export. They do **not** by themselves prove that multiple authenticated clients synchronize correctly through Supabase.
+These checks validate TypeScript, the allocation utility tests, Expo configuration, and the web export. **They do not prove multi-client Realtime behavior.**
 
-## Recommended manual Realtime test
+## `08` / The real-world test checklist
 
-Use at least three independently authenticated clients in the same test room:
+Use at least three independently authenticated clients in the same test room when possible.
 
-1. Confirm no answer is highlighted before any response is committed.
-2. Have one participant commit A at 100%; verify A is highlighted on every client.
-3. Have two participants commit B at 100%; verify B becomes the leader everywhere, including on the client that voted A.
-4. Change a committed response using recommit and confirm the aggregate leader updates without double-counting that participant.
-5. Advance the poll from the operator's main screen; confirm all clients receive the new poll number/version and the timer resets.
-6. Confirm the previous poll's leader disappears and old responses do not contribute to the new poll.
-7. End the room and confirm all clients receive the room-ended state.
-8. Reconnect a client and confirm it recovers the current authoritative room state.
+- [ ] Before anyone commits, no option is highlighted.
+- [ ] One client commits `A = 100%`; every client sees `A` highlighted.
+- [ ] Two more clients commit `B = 100%`; every client—including the first client—sees `B` highlighted.
+- [ ] Recommitting replaces the previous response rather than double-counting the person.
+- [ ] Draft changes do not alter the leader until committed.
+- [ ] Advancing the poll updates every client and resets the timer.
+- [ ] Previous-poll responses and the previous leader do not appear in the new poll.
+- [ ] Reconnecting a client restores the current authoritative room state.
+- [ ] Ending the room moves every client into a room-ended state.
+- [ ] Ordinary participants cannot invoke operator-only actions.
 
-Record which checks were actually performed; a successful build is not equivalent to a successful multi-client test.
+Only mark a check as complete after observing it. A successful compile is not proof that two devices stayed synchronized.
 
-## Project structure
-
-A quick guide to the principal files referenced in the project:
+## `09` / Project map
 
 ```text
 src/
 ├── app/
-│   ├── _layout.tsx              # Root navigation/layout
-│   ├── index.tsx                # Entry screen
+│   ├── _layout.tsx
+│   ├── index.tsx
 │   └── room/
-│       └── [id].tsx             # Room and voting screen
+│       └── [id].tsx             # Room screen and operator controls
 ├── components/
-│   ├── OptionCard.tsx           # Voting option UI
-│   ├── VotingPanel.tsx          # Confidence allocation controls
+│   ├── OptionCard.tsx           # Answer option UI
+│   ├── VotingPanel.tsx          # Confidence allocation and commit controls
 │   ├── LeaderboardOptionRow.tsx # Animated leader-border component
-│   └── ResultsModal.tsx         # Existing results UI, if still referenced
+│   └── ResultsModal.tsx         # Legacy/separate results UI; remove if no longer used
 ├── hooks/
-│   └── useRoomRealtime.ts       # Room Realtime synchronization
+│   └── useRoomRealtime.ts       # Room subscription and synchronization
 ├── lib/
 │   └── supabase.ts              # Supabase client
 ├── stores/
-│   └── roomStore.ts             # Room state
+│   └── roomStore.ts             # Client room state
 ├── types/
-│   ├── database.ts              # Database types
-│   └── voting.ts                # Voting types
+│   ├── database.ts
+│   └── voting.ts
 └── utils/
-    └── allocation.ts            # Confidence allocation logic
+    └── allocation.ts            # Confidence allocation rules
 
 supabase/
 └── migrations/
     └── 20261107000000_initial_schema.sql
 ```
 
-The structure may evolve. Check the actual workspace before relying on this tree as an exhaustive file listing.
+This is a guide to the principal files discussed during development, not a guarantee that every path is still present. Confirm the current workspace before using it as an exhaustive tree.
 
-## Security notes
+## `10` / Troubleshooting
 
-- Keep the Supabase service-role key out of the client application and source control.
-- Enforce room membership and operator permissions on the server using RLS and secure database functions; hiding a button in the UI is not authorization.
-- Validate the current poll version on every vote write so old responses cannot affect the active poll.
-- Do not put real credentials in screenshots, commits, issue reports, or this README.
+<details>
+<summary><strong>Environment changes are not picked up</strong></summary>
 
-## Troubleshooting
-
-**Environment changes are not picked up**
-
-Stop Expo and restart it with a cleared cache:
+Stop Expo and restart with a clean cache:
 
 ```bash
 npx expo start -c
 ```
+</details>
 
-**Participants do not see a question advance or leader change**
+<details>
+<summary><strong>One device advances, but the others stay on the old question</strong></summary>
 
-Check that the clients are connected to the same Supabase project and room, that Realtime is configured for the relevant tables/channels, that subscriptions are filtered correctly, and that the committed response or poll change was persisted successfully. A local UI update on the operator's device is not proof of a room-wide update.
+Verify that all clients use the same Supabase project and room ID, that the operator's RPC succeeds, and that the room Realtime subscription is active. Confirm the server's poll version directly and test reconnection/resync behavior. Do not treat a local question-number change as proof of synchronization.
+</details>
 
-**Database migration errors**
+<details>
+<summary><strong>The leader highlight does not move</strong></summary>
 
-Check whether the migration was already applied before rerunning it. Review existing tables, functions, policies, and Realtime publications rather than blindly repeating SQL.
+Check that the committed response was persisted, the aggregate refreshed, the active poll version matches, and the global leader state is passed to the actual A/B/C/D cards—not just to a separate results component.
+</details>
 
-**TypeScript or Expo checks fail**
+<details>
+<summary><strong>Supabase migration errors</strong></summary>
 
-Install dependencies and review the first reported error before changing package versions or rewriting working components.
+Check what tables, functions, policies, and Realtime publications already exist before applying SQL again. Avoid blindly rerunning an initial migration against a populated project.
+</details>
 
-## Contributing
+## `11` / Security rules
 
-Before changing voting, synchronization, or authorization behavior:
+- Keep service-role credentials out of client code, Git, and screenshots.
+- Enforce room membership and operator permissions on the backend—not only by hiding buttons.
+- Validate active poll versions when accepting responses.
+- Preserve RLS and test it with ordinary participant accounts.
+- Never commit real credentials to `.env`.
 
-1. Inspect the existing implementation and database policies.
-2. Keep changes focused and avoid replacing working modules unnecessarily.
-3. Run the validation commands above.
-4. Test behavior with multiple authenticated clients when touching Realtime functionality.
-5. Report separately what was verified automatically and what remains to be tested manually.
+## `12` / Contributing
+
+Before changing room state, votes, or synchronization:
+
+1. Inspect the existing implementation and backend policies first.
+2. Keep changes focused; preserve working modules and voting semantics.
+3. Run the validation commands.
+4. Test with independent clients when touching Realtime behavior.
+5. Report automated results separately from manual checks that remain.
+
+---
+
+<div align="center">
+  <h3>ClueMate</h3>
+  <p><strong>Think together. See where the room stands.</strong></p>
+  <sub>Built for the moment when everyone has an opinion—and the group needs a signal.</sub>
+</div>
