@@ -578,6 +578,10 @@ $$;
 -- -----------------------------------------------------------------------------
 -- Enable Realtime for Synchronized Tables
 -- -----------------------------------------------------------------------------
+alter table public.rooms replica identity full;
+alter table public.poll_responses replica identity full;
+alter table public.room_members replica identity full;
+
 do $$
 begin
   alter publication supabase_realtime add table public.rooms;

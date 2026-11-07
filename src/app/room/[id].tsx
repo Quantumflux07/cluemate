@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   StyleSheet,
   Text,
@@ -14,7 +14,6 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import * as Clipboard from 'expo-clipboard';
 import { VotingPanel } from '../../components/VotingPanel';
-import { ResultsModal } from '../../components/ResultsModal';
 import { AllocationDraft, CommittedVote, OptionKey, OPTION_KEYS } from '../../types/voting';
 import {
   handleOptionTap,
@@ -42,10 +41,10 @@ export default function VotingRoomScreen() {
   const [committedVote, setCommittedVote] = useState<CommittedVote | null>(null);
   const [secondsElapsed, setSecondsElapsed] = useState(0);
   const [submitting, setSubmitting] = useState(false);
-  const [refreshingPoll, setRefreshingPoll] = useState(false);
+  const [isAdvancingPoll, setIsAdvancingPoll] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedCode, setCopiedCode] = useState(false);
-  const [showResults, setShowResults] = useState(false);
+  const [roomEnded, setRoomEnded] = useState(false);
 
   // Initial room fetch
   useEffect(() => {
@@ -55,27 +54,35 @@ export default function VotingRoomScreen() {
         setErrorMessage(res.error || 'Failed to connect to room');
       }
     });
-  }, [id]);
+  }, [id, fetchRoom]);
+
+  // Stable callbacks for Realtime Hook
+  const handleRoomUpdate = useCallback((updatedRoom: RoomRow) => {
+    setCurrentRoom(updatedRoom);
+  }, [setCurrentRoom]);
+
+  const handlePollVersionChanged = useCallback((_newVersion: number, _newQuestionNumber: number) => {
+    if (Platform.OS !== 'web') {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+    }
+  }, []);
+
+  const handleRoomEnded = useCallback(() => {
+    setRoomEnded(true);
+  }, []);
 
   // Synchronized Realtime Hook
-  const { aggregate } = useRoomRealtime({
+  const {
+    aggregate,
+    broadcastPollAdvance,
+    manualAdvance,
+  } = useRoomRealtime({
     roomId: id || '',
     userId: user?.id,
     currentRoom,
-    onRoomUpdate: (updatedRoom: RoomRow) => {
-      setCurrentRoom(updatedRoom, userRole);
-    },
-    onPollVersionChanged: (newVersion, newQuestionNumber) => {
-      if (Platform.OS !== 'web') {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
-      }
-      setShowResults(false);
-    },
-    onRoomEnded: () => {
-      Alert.alert('Session Ended', 'The room operator has ended this session.', [
-        { text: 'OK', onPress: () => router.replace('/home') },
-      ]);
-    },
+    onRoomUpdate: handleRoomUpdate,
+    onPollVersionChanged: handlePollVersionChanged,
+    onRoomEnded: handleRoomEnded,
     setDraft,
     setCommittedVote,
   });
@@ -186,46 +193,51 @@ export default function VotingRoomScreen() {
     }
   };
 
-  // Operator Action: Refresh Poll
-  const handleRefreshPoll = async () => {
-    if (!id || userRole !== 'operator') return;
+  // Operator Action: Advance to Next Question
+  const handleNextQuestion = async () => {
+    if (!id || userRole !== 'operator' || isAdvancingPoll || !currentRoom) return;
 
-    setRefreshingPoll(true);
+    setIsAdvancingPoll(true);
+    setErrorMessage(null);
+
+    if (Platform.OS !== 'web') {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+    }
+
     try {
+      // 1. Authoritative server advancement via existing RPC
       const { data, error } = await supabase.rpc('refresh_poll', {
         p_room_id: id,
       });
 
       if (error) {
-        Alert.alert('Error', error.message);
-        setRefreshingPoll(false);
+        Alert.alert('Advancement Error', error.message);
+        setIsAdvancingPoll(false);
         return;
       }
 
-      // Update local room state immediately
-      if (data && currentRoom) {
-        setCurrentRoom(
-          {
-            ...currentRoom,
-            current_poll_version: data.current_poll_version,
-            current_question_number: data.current_question_number,
-            timer_started_at: data.timer_started_at,
-          },
-          'operator'
-        );
-      }
+      // 2. Broadcast to Realtime channel for zero-latency peer notification
+      await broadcastPollAdvance(
+        data.current_poll_version,
+        data.current_question_number,
+        data.timer_started_at
+      );
 
-      setDraft(resetDraft());
-      setCommittedVote(null);
-      setRefreshingPoll(false);
-      setShowResults(false);
+      // 3. Process new state on operator client (after server confirms)
+      manualAdvance(
+        data.current_poll_version,
+        data.current_question_number,
+        data.timer_started_at
+      );
+
+      setIsAdvancingPoll(false);
     } catch (err: any) {
-      Alert.alert('Error', err.message || 'Failed to refresh poll');
-      setRefreshingPoll(false);
+      Alert.alert('Error', err.message || 'Failed to advance question');
+      setIsAdvancingPoll(false);
     }
   };
 
-  // Operator Action: End Room
+  // Operator Action: End Room — updates DB, Realtime propagates to all clients
   const handleEndRoom = async () => {
     if (!id || userRole !== 'operator') return;
 
@@ -238,11 +250,16 @@ export default function VotingRoomScreen() {
           text: 'End Session',
           style: 'destructive',
           onPress: async () => {
-            await supabase
+            const { error } = await supabase
               .from('rooms')
               .update({ status: 'ended' })
               .eq('id', id);
-            router.replace('/home');
+            if (error) {
+              Alert.alert('Error', 'Failed to end session: ' + error.message);
+              return;
+            }
+            // Realtime will fire onRoomEnded for all clients including operator
+            setRoomEnded(true);
           },
         },
       ]
@@ -279,12 +296,34 @@ export default function VotingRoomScreen() {
     return false;
   }, [draft, committedVote, isCommittable]);
 
+  // Loading state
   if (roomLoading && !currentRoom) {
     return (
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.centerLoading}>
           <ActivityIndicator size="large" color="#38BDF8" />
           <Text style={styles.loadingText}>Connecting to room...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // Room Ended screen — shown to ALL clients (operator and participants)
+  if (roomEnded) {
+    return (
+      <SafeAreaView style={styles.safeArea}>
+        <View style={styles.endedContainer}>
+          <Text style={styles.endedIcon}>🏁</Text>
+          <Text style={styles.endedTitle}>Session Ended</Text>
+          <Text style={styles.endedSubtitle}>
+            The voting session has been closed by the host.
+          </Text>
+          <Pressable
+            onPress={() => router.replace('/home')}
+            style={({ pressed }) => [styles.returnHomeButton, { opacity: pressed ? 0.8 : 1 }]}
+          >
+            <Text style={styles.returnHomeText}>Return Home</Text>
+          </Pressable>
         </View>
       </SafeAreaView>
     );
@@ -301,7 +340,7 @@ export default function VotingRoomScreen() {
         bounces={false}
         showsVerticalScrollIndicator={false}
       >
-        {/* Navigation / Room Bar */}
+        {/* Top Bar: Leave | Room Code | (nothing — Results button removed) */}
         <View style={styles.topBar}>
           <Pressable onPress={handleLeaveRoom} style={styles.leaveButton}>
             <Text style={styles.leaveText}>← Leave</Text>
@@ -309,7 +348,15 @@ export default function VotingRoomScreen() {
 
           <View style={styles.topBarCenter}>
             {currentRoom && (
-              <Pressable onPress={handleCopyCode} style={styles.roomCodePill}>
+              <Pressable
+                onPress={handleCopyCode}
+                style={({ pressed }) => [
+                  styles.roomCodePill,
+                  { opacity: pressed ? 0.75 : 1 },
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Copy room code"
+              >
                 <Text style={styles.roomCodePillText}>
                   {currentRoom.room_code} {copiedCode ? '✓' : ''}
                 </Text>
@@ -317,19 +364,12 @@ export default function VotingRoomScreen() {
             )}
           </View>
 
-          {/* Results / Operator Drawer Trigger */}
-          <Pressable
-            onPress={() => setShowResults(true)}
-            style={({ pressed }) => [
-              styles.resultsTrigger,
-              isOperator && styles.resultsTriggerOperator,
-              { opacity: pressed ? 0.75 : 1 },
-            ]}
-          >
-            <Text style={[styles.resultsTriggerText, isOperator && styles.resultsTriggerOperatorText]}>
-              {isOperator ? `👑 Results (${totalVotes}/${totalMembers})` : `Results (${totalVotes})`}
+          {/* Vote count badge (replaces the Results trigger) */}
+          <View style={styles.voteCountBadge}>
+            <Text style={styles.voteCountText}>
+              {totalVotes}{totalMembers > 0 ? `/${totalMembers}` : ''} voted
             </Text>
-          </Pressable>
+          </View>
         </View>
 
         {errorMessage && (
@@ -338,7 +378,7 @@ export default function VotingRoomScreen() {
           </View>
         )}
 
-        {/* Minimal Header: Question number left, timer right */}
+        {/* Question Number + Timer Header */}
         <View style={styles.header}>
           <View style={styles.questionBadge}>
             <Text style={styles.questionText}>
@@ -351,7 +391,7 @@ export default function VotingRoomScreen() {
           </View>
         </View>
 
-        {/* Central Voting Panel */}
+        {/* Central Voting Panel — VotingPanel now shows leader border inline */}
         <View style={styles.panelWrapper}>
           <VotingPanel
             draft={draft}
@@ -360,10 +400,11 @@ export default function VotingRoomScreen() {
             onToggleDontKnow={onToggleDontKnow}
             onReset={onReset}
             onCommit={onCommit}
+            aggregate={aggregate}
           />
         </View>
 
-        {/* Subtle Status Footer */}
+        {/* Status Indicator */}
         <View style={styles.statusFooter}>
           <View
             style={[
@@ -389,19 +430,48 @@ export default function VotingRoomScreen() {
               : 'Draft (unallocated)'}
           </Text>
         </View>
-      </ScrollView>
 
-      {/* Aggregate Group Results & Operator Controls Modal */}
-      <ResultsModal
-        visible={showResults}
-        onClose={() => setShowResults(false)}
-        aggregate={aggregate}
-        questionNumber={currentRoom?.current_question_number || 1}
-        userRole={userRole}
-        onRefreshPoll={handleRefreshPoll}
-        onEndRoom={handleEndRoom}
-        refreshingPoll={refreshingPoll}
-      />
+        {/* Operator Controls — Next Question + End Session */}
+        {isOperator && (
+          <View style={styles.operatorControlArea}>
+            <View style={styles.operatorControlHeader}>
+              <Text style={styles.operatorControlTitle}>👑 Host Controls</Text>
+              <Text style={styles.operatorControlSubtitle}>
+                {totalVotes} of {totalMembers} committed
+              </Text>
+            </View>
+
+            <Pressable
+              onPress={handleNextQuestion}
+              disabled={isAdvancingPoll}
+              style={({ pressed }) => [
+                styles.nextQuestionButton,
+                {
+                  opacity: isAdvancingPoll ? 0.6 : pressed ? 0.88 : 1,
+                  transform: [{ scale: pressed && !isAdvancingPoll ? 0.985 : 1 }],
+                },
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel="Next Question"
+            >
+              {isAdvancingPoll ? (
+                <View style={styles.loadingRow}>
+                  <ActivityIndicator size="small" color="#FFFFFF" />
+                  <Text style={styles.nextQuestionButtonText}>Advancing Question...</Text>
+                </View>
+              ) : (
+                <Text style={styles.nextQuestionButtonText}>
+                  Next Question (Q{(currentRoom?.current_question_number || 1) + 1}) →
+                </Text>
+              )}
+            </Pressable>
+
+            <Pressable onPress={handleEndRoom} style={styles.endRoomMainButton}>
+              <Text style={styles.endRoomMainText}>End Session</Text>
+            </Pressable>
+          </View>
+        )}
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -421,12 +491,50 @@ const styles = StyleSheet.create({
     color: colors.text.muted,
     fontSize: 14,
   },
+  // Room Ended screen
+  endedContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+    gap: 16,
+  },
+  endedIcon: {
+    fontSize: 56,
+  },
+  endedTitle: {
+    color: colors.text.primary,
+    fontSize: 28,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  endedSubtitle: {
+    color: colors.text.secondary,
+    fontSize: 15,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  returnHomeButton: {
+    marginTop: 8,
+    backgroundColor: colors.commitButton.bg,
+    paddingVertical: 14,
+    paddingHorizontal: 36,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.commitButton.border,
+  },
+  returnHomeText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  // Main screen
   scrollContent: {
     flexGrow: 1,
     justifyContent: 'space-between',
     paddingHorizontal: 20,
     paddingTop: 8,
-    paddingBottom: 24,
+    paddingBottom: 28,
   },
   topBar: {
     flexDirection: 'row',
@@ -462,25 +570,18 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 1.5,
   },
-  resultsTrigger: {
-    backgroundColor: '#1E293B',
+  voteCountBadge: {
+    backgroundColor: '#151D2A',
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#334155',
+    borderColor: '#1E293B',
   },
-  resultsTriggerOperator: {
-    backgroundColor: 'rgba(251, 146, 60, 0.15)',
-    borderColor: '#FB923C',
-  },
-  resultsTriggerText: {
-    color: colors.text.secondary,
+  voteCountText: {
+    color: colors.text.muted,
     fontSize: 12,
-    fontWeight: '700',
-  },
-  resultsTriggerOperatorText: {
-    color: '#FB923C',
+    fontWeight: '600',
   },
   errorBanner: {
     backgroundColor: 'rgba(239, 68, 68, 0.15)',
@@ -542,14 +643,14 @@ const styles = StyleSheet.create({
   panelWrapper: {
     flex: 1,
     justifyContent: 'center',
-    paddingVertical: 16,
+    paddingVertical: 12,
   },
   statusFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    paddingVertical: 12,
+    paddingVertical: 8,
   },
   statusIndicator: {
     width: 6,
@@ -560,5 +661,58 @@ const styles = StyleSheet.create({
     color: colors.text.muted,
     fontSize: 13,
     fontWeight: '500',
+  },
+  operatorControlArea: {
+    backgroundColor: '#131A26',
+    borderRadius: 20,
+    borderWidth: 1.5,
+    borderColor: '#FB923C',
+    padding: 16,
+    marginTop: 10,
+    gap: 12,
+  },
+  operatorControlHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  operatorControlTitle: {
+    color: '#FB923C',
+    fontSize: 14,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  operatorControlSubtitle: {
+    color: colors.text.muted,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  nextQuestionButton: {
+    height: 48,
+    backgroundColor: colors.commitButton.bg,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.commitButton.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  nextQuestionButtonText: {
+    color: '#FFFFFF',
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  endRoomMainButton: {
+    alignSelf: 'center',
+    paddingVertical: 4,
+  },
+  endRoomMainText: {
+    color: '#EF4444',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

@@ -1,8 +1,9 @@
 import React from 'react';
 import { StyleSheet, View, Text, Pressable, Platform } from 'react-native';
 import * as Haptics from 'expo-haptics';
-import { OptionCard } from './OptionCard';
+import { LeaderboardOptionRow } from './LeaderboardOptionRow';
 import { AllocationDraft, CommittedVote, OptionKey, OPTION_KEYS } from '../types/voting';
+import { RoomAggregateResult } from '../types/database';
 import { isAllocationCommittable } from '../utils/allocation';
 import { colors } from '../theme/colors';
 
@@ -13,6 +14,8 @@ interface VotingPanelProps {
   onToggleDontKnow: () => void;
   onReset: () => void;
   onCommit: () => void;
+  /** Aggregate data from server used to compute live leader */
+  aggregate?: RoomAggregateResult | null;
 }
 
 export const VotingPanel: React.FC<VotingPanelProps> = ({
@@ -22,6 +25,7 @@ export const VotingPanel: React.FC<VotingPanelProps> = ({
   onToggleDontKnow,
   onReset,
   onCommit,
+  aggregate,
 }) => {
   const isDontKnowActive = draft.isDontKnow;
   const isCommittable = isAllocationCommittable(draft);
@@ -41,6 +45,32 @@ export const VotingPanel: React.FC<VotingPanelProps> = ({
   }, [draft, committedVote, isCommittable]);
 
   const canCommit = isCommittable && hasUncommittedChanges;
+
+  // Compute global leader from server aggregate (not from local draft)
+  const leaderKeys = React.useMemo((): Set<OptionKey> => {
+    if (!aggregate || aggregate.total_votes === 0) return new Set();
+    const meanA = aggregate.mean_a || 0;
+    const meanB = aggregate.mean_b || 0;
+    const meanC = aggregate.mean_c || 0;
+    const meanD = aggregate.mean_d || 0;
+    const max = Math.max(meanA, meanB, meanC, meanD);
+    if (max === 0) return new Set();
+    const leaders = new Set<OptionKey>();
+    if (meanA === max) leaders.add('a');
+    if (meanB === max) leaders.add('b');
+    if (meanC === max) leaders.add('c');
+    if (meanD === max) leaders.add('d');
+    return leaders;
+  }, [aggregate]);
+
+  // Map option key to aggregate percentage for the leader overlay
+  const getAggregatePct = (key: OptionKey): number => {
+    if (!aggregate) return 0;
+    if (key === 'a') return aggregate.mean_a || 0;
+    if (key === 'b') return aggregate.mean_b || 0;
+    if (key === 'c') return aggregate.mean_c || 0;
+    return aggregate.mean_d || 0;
+  };
 
   const handleDontKnowPress = () => {
     if (Platform.OS !== 'web') {
@@ -66,16 +96,19 @@ export const VotingPanel: React.FC<VotingPanelProps> = ({
 
   return (
     <View style={styles.cardContainer}>
-      {/* 4 Option Buttons: A, B, C, D */}
+      {/* 4 Option Buttons: A, B, C, D — with live leader highlight */}
       <View style={styles.optionsList}>
         {OPTION_KEYS.map((key) => (
-          <OptionCard
+          <LeaderboardOptionRow
             key={key}
             optionKey={key}
             label={key.toUpperCase()}
             percentage={draft.percentages[key]}
+            isLeader={leaderKeys.has(key)}
+            accentColor={colors.options[key].accent}
             onPress={onOptionTap}
             disabled={isDontKnowActive}
+            showFillBar
           />
         ))}
       </View>

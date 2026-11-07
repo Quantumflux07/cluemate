@@ -23,7 +23,7 @@ interface RoomState {
   fetchActiveRooms: () => Promise<void>;
   fetchRoom: (roomId: string) => Promise<{ success: boolean; room?: RoomRow; role?: MemberRole; error?: string }>;
   leaveRoom: (roomId: string) => Promise<{ success: boolean; error?: string }>;
-  setCurrentRoom: (room: RoomRow | null, role: MemberRole | null) => void;
+  setCurrentRoom: (room: RoomRow | null, role?: MemberRole | null) => void;
 }
 
 export const useRoomStore = create<RoomState>((set, get) => ({
@@ -203,6 +203,9 @@ export const useRoomStore = create<RoomState>((set, get) => ({
   },
 
   setCurrentRoom: (room, role) => {
-    set({ currentRoom: room, userRole: role });
+    set({
+      currentRoom: room,
+      userRole: role !== undefined ? role : get().userRole,
+    });
   },
 }));
